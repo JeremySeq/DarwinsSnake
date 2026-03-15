@@ -40,4 +40,7 @@ Once it gets good at that, I will remove the extra rewards, leaving only food an
 - v2
 - v3: added higher penalty for suicide, 2000 generations
 - v4 (v3): +1000 generations, higher step limit (200 -> 400)
-- v5: cnn architecture, given full grid
+- v5: new crossover algorithm, step limit = 750
+    - avoids suicide by taking wide paths to food, very inefficient
+- v6 (v5): +20000 generations, step limit = 1000
+- v7: snake length as input

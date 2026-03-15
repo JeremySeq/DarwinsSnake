@@ -1,3 +1,4 @@
+from asyncio import as_completed
 import os
 import sys
 import random
@@ -6,6 +7,7 @@ from collections import deque
 from typing import Tuple, List
 import numpy as np
 import nn
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 Cell = Tuple[int, int]
 
@@ -263,7 +265,53 @@ def run_interactive(fps=10):
             pygame.time.wait(600)
             game.reset()
 
-def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_generations: int = np.inf):
+def evaluate_individual(net, seed, step_limit):
+    total_reward = 0
+    step = 0
+    visited = []
+
+    game = Game(render=False, fps=500, seed=seed)
+
+    while True:
+
+        input_vec = game.get_input_vector()
+        output = net.forward(input_vec)
+        action = output.argmax()
+
+        reward, done = game.step(action)
+
+        step += 1
+        total_reward += reward
+
+        x_head, y_head = game.snake[-1]
+
+        # penalize revisiting cells
+        if (x_head, y_head) in visited:
+            total_reward -= 0.5
+        else:
+            visited.append((x_head, y_head))
+
+        if len(visited) > 10:
+            visited.pop(0)
+
+        # reward moving toward food
+        if game.food:
+            food_x, food_y = game.food
+            current_distance = abs(x_head - food_x) + abs(y_head - food_y)
+
+            if len(game.snake) > 1:
+                prev_x, prev_y = game.snake[-2]
+                prev_distance = abs(prev_x - food_x) + abs(prev_y - food_y)
+
+                if current_distance < prev_distance:
+                    total_reward += 0.2
+
+        if done or step > step_limit:
+            break
+
+    return total_reward
+
+def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_generations: int = np.inf, step_limit=400):
 
     individuals_per_generation = 20
 
@@ -285,66 +333,27 @@ def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_gene
     generation_num = 0
 
     while True:
-        
-        fitness = []
-        seed = generation_num # use generation number as seed
 
-        # GENERATION LOOP
-        for individual in range(individuals_per_generation):
+        fitness = [0] * individuals_per_generation
+        seed = generation_num
 
-            net = generation[individual]
-            total_reward = 0
-            step = 0
+        with ThreadPoolExecutor(max_workers=individuals_per_generation) as executor:
 
-            visited = []
+            futures = {
+                executor.submit(
+                    evaluate_individual,
+                    generation[i],
+                    seed,
+                    step_limit
+                ): i for i in range(individuals_per_generation)
+            }
 
-            game = Game(render=True, fps=500, seed=seed) # create new game instance for each individual with same seed
-            
+            for future in as_completed(futures):
+                i = futures[future]
+                result = future.result()
+                fitness[i] = result
+                print(f"Individual {i} fitness: {result}")
 
-            # GAME LOOP
-            while True:
-                
-                input_vec = game.get_input_vector()
-
-                output = net.forward(input_vec)
-
-                action = output.argmax() # choose action with highest output
-
-                reward, done = game.step(action)
-                step += 1
-                total_reward += reward
-
-                x_head, y_head = game.snake[-1]
-
-                # penalize for visiting recent cells to encourage exploration
-                if (x_head, y_head) in visited:
-                    total_reward -= .5
-                else:
-                    visited.append((x_head, y_head))
-
-                # prune visited to latest 10
-                if len(visited) > 10:
-                    visited.pop()
-
-                # give reward for going towards food
-                if game.food:
-                    food_x, food_y = game.food
-                    current_distance = abs(x_head - food_x) + abs(y_head - food_y)
-                    if len(game.snake) > 1:
-                        prev_x, prev_y = game.snake[-2]
-                        prev_distance = abs(prev_x - food_x) + abs(prev_y - food_y)
-                        if current_distance < prev_distance:
-                            total_reward += 0.2
-
-                # end run if done or too long
-                if done or step > 400:
-                    pygame.time.wait(600)
-                    game.reset()
-                    break
-
-            fitness.append(total_reward)
-            print(f"Individual {individual} fitness: {total_reward}")
-            
 
         print(f"Generation {generation_num} complete.\n-------------")
 
@@ -376,17 +385,23 @@ def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_gene
         new_generation.extend(top_elite)
 
         # generate the rest via crossover
+        def crossover(genome1, genome2, blend_prob=0.3, alpha=0.3):
+            child_genome = np.empty_like(genome1)
+            for i in range(len(genome1)):
+                if np.random.rand() < blend_prob:
+                    lo = min(genome1[i], genome2[i]) - alpha * abs(genome1[i] - genome2[i])
+                    hi = max(genome1[i], genome2[i]) + alpha * abs(genome1[i] - genome2[i])
+                    child_genome[i] = np.random.uniform(lo, hi)
+                else:
+                    child_genome[i] = genome1[i] if np.random.rand() < 0.5 else genome2[i]
+            return child_genome
+
         while len(new_generation) < individuals_per_generation:
             parent1 = random.choice(selected_nets)
             parent2 = random.choice(selected_nets)
-            
-            child = nn.NeuralNetworkFixed(input_size=9, hidden_size=6, output_size=3)
 
-            # simple crossover: half genome from each parent
-            genome1 = parent1.to_genome()
-            genome2 = parent2.to_genome()
-            crossover_point = len(genome1) // 2
-            child_genome = np.concatenate([genome1[:crossover_point], genome2[crossover_point:]])
+            child = nn.NeuralNetworkFixed(input_size=9, hidden_size=6, output_size=3)
+            child_genome = crossover(parent1.to_genome(), parent2.to_genome())
             child.set_from_genome(child_genome)
 
             new_generation.append(child)
@@ -425,5 +440,5 @@ def run_save(saved_genome: str):
             game.reset()
 
 if __name__ == '__main__':
-    run_save("v4/best_gen_1000.npy")
-    # run_ga(from_saved="v3/best_gen_2000.npy", to_save="v4/best_gen_{}.npy", max_generations=1000)
+    run_save("v6/best_gen_20000.npy")
+    # run_ga(from_saved="v5/best_gen_2000.npy", to_save="v6/best_gen_{}.npy", max_generations=20000, step_limit=1000)
