@@ -68,7 +68,7 @@ class Game:
             "score": self.score,
         }
     
-    def get_input_vector(self) -> List[float]:
+    def get_input_vector(self, input_size: int = 10) -> List[float]:
         # danger_straight = 0, 1
         # danger_left = 0, 1
         # danger_right = 0, 1
@@ -78,6 +78,7 @@ class Game:
         # distance_straight_wall = 0->1
         # distance_left_wall = 0->1
         # distance_right_wall = 0->1
+        # snake_length = 0->1 (normalized by max length)
 
         head = self.snake[-1]
         dx, dy = self.direction
@@ -136,8 +137,11 @@ class Game:
             # normalize by max distance
             normalized = distance / max(self.grid_size, 1)
             vector.append(normalized)
+
+        # snake length normalized
+        vector.append(len(self.snake) / (self.grid_size * self.grid_size * .5))  # max length is half the board (worst case snake fills half the board)
         
-        return vector
+        return vector[:input_size]
 
 
     def _turn_relative(self, action: int):
@@ -265,7 +269,7 @@ def run_interactive(fps=10):
             pygame.time.wait(600)
             game.reset()
 
-def evaluate_individual(net, seed, step_limit):
+def evaluate_individual(net, seed, step_limit, input_size=10, incentivize_exploration=False):
     total_reward = 0
     step = 0
     visited = []
@@ -274,7 +278,7 @@ def evaluate_individual(net, seed, step_limit):
 
     while True:
 
-        input_vec = game.get_input_vector()
+        input_vec = game.get_input_vector(input_size=input_size)
         output = net.forward(input_vec)
         action = output.argmax()
 
@@ -285,33 +289,34 @@ def evaluate_individual(net, seed, step_limit):
 
         x_head, y_head = game.snake[-1]
 
-        # penalize revisiting cells
-        if (x_head, y_head) in visited:
-            total_reward -= 0.5
-        else:
-            visited.append((x_head, y_head))
+        if incentivize_exploration:
+            # penalize revisiting cells
+            if (x_head, y_head) in visited:
+                total_reward -= 0.5
+            else:
+                visited.append((x_head, y_head))
 
-        if len(visited) > 10:
-            visited.pop(0)
+            if len(visited) > 10:
+                visited.pop(0)
 
-        # reward moving toward food
-        if game.food:
-            food_x, food_y = game.food
-            current_distance = abs(x_head - food_x) + abs(y_head - food_y)
+            # reward moving toward food
+            if game.food:
+                food_x, food_y = game.food
+                current_distance = abs(x_head - food_x) + abs(y_head - food_y)
 
-            if len(game.snake) > 1:
-                prev_x, prev_y = game.snake[-2]
-                prev_distance = abs(prev_x - food_x) + abs(prev_y - food_y)
+                if len(game.snake) > 1:
+                    prev_x, prev_y = game.snake[-2]
+                    prev_distance = abs(prev_x - food_x) + abs(prev_y - food_y)
 
-                if current_distance < prev_distance:
-                    total_reward += 0.2
+                    if current_distance < prev_distance:
+                        total_reward += 0.2
 
         if done or step > step_limit:
             break
 
     return total_reward
 
-def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_generations: int = np.inf, step_limit=400):
+def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_generations: int = np.inf, step_limit=400, save_interval=50, nn_structure = (10, 16, 3), incentivize_exploration=True):
 
     individuals_per_generation = 20
 
@@ -323,12 +328,12 @@ def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_gene
             return
 
         genome = np.load(from_saved)
-        net = nn.NeuralNetworkFixed(input_size=9, hidden_size=6, output_size=3)
+        net = nn.NeuralNetworkFixed(input_size=nn_structure[0], hidden_size=nn_structure[1], output_size=nn_structure[2])
         net.set_from_genome(genome)
         generation.append(net)
 
     while len(generation) < individuals_per_generation:
-        generation.append(nn.NeuralNetworkFixed(input_size=9, hidden_size=6, output_size=3))
+        generation.append(nn.NeuralNetworkFixed(input_size=nn_structure[0], hidden_size=nn_structure[1], output_size=nn_structure[2]))
 
     generation_num = 0
 
@@ -344,7 +349,9 @@ def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_gene
                     evaluate_individual,
                     generation[i],
                     seed,
-                    step_limit
+                    step_limit,
+                    nn_structure[0],
+                    incentivize_exploration
                 ): i for i in range(individuals_per_generation)
             }
 
@@ -363,19 +370,20 @@ def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_gene
         selected = sorted(zip(generation, fitness), key=lambda x: x[1], reverse=True)[:individuals_per_generation//2]
         selected_nets = [s[0] for s in selected]
 
-        # save best-performing network if it improves
-        best_net = selected_nets[0]
-        best_fit = fitness[fitness.index(max(fitness))]
-        genome = best_net.to_genome()
-        best_genome_file = to_save.format(generation_num)
-        os.makedirs(os.path.dirname(best_genome_file), exist_ok=True)
-        np.save(best_genome_file, genome)
-        print(f"(Best fitness {best_fit}. Saved genome to {best_genome_file})")
+        # save best-performing network at the first generation and at intervals after
+        if generation_num == 1 or generation_num % save_interval == 0:
+            best_net = selected_nets[0]
+            best_fit = fitness[fitness.index(max(fitness))]
+            genome = best_net.to_genome()
+            best_genome_file = to_save.format(generation_num)
+            os.makedirs(os.path.dirname(best_genome_file), exist_ok=True)
+            np.save(best_genome_file, genome)
+            print(f"(Best fitness {best_fit}. Saved genome to {best_genome_file})")
 
-        # stop if we reach max generations
-        if generation_num >= max_generations:
-            print("Reached max generations. Stopping.")
-            break
+            # stop if we reach max generations
+            if generation_num >= max_generations:
+                print("Reached max generations. Stopping.")
+                break
 
         # CROSSOVER
         new_generation = []
@@ -400,7 +408,7 @@ def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_gene
             parent1 = random.choice(selected_nets)
             parent2 = random.choice(selected_nets)
 
-            child = nn.NeuralNetworkFixed(input_size=9, hidden_size=6, output_size=3)
+            child = nn.NeuralNetworkFixed(input_size=nn_structure[0], hidden_size=nn_structure[1], output_size=nn_structure[2])
             child_genome = crossover(parent1.to_genome(), parent2.to_genome())
             child.set_from_genome(child_genome)
 
@@ -414,31 +422,36 @@ def run_ga(from_saved: str = None, to_save: str = "vx/best_gen_{}.npy", max_gene
 
         print(f"Starting generation {generation_num}...")
 
-def run_save(saved_genome: str):
+def run_save(saved_genome: str, nn_structure = (10, 16, 3)):
     best_genome_file = saved_genome
     if not os.path.exists(best_genome_file):
         print(f"No saved genome found at {best_genome_file}")
         return
 
     genome = np.load(best_genome_file)
-    net = nn.NeuralNetworkFixed(input_size=9, hidden_size=6, output_size=3)
+    net = nn.NeuralNetworkFixed(input_size=nn_structure[0], hidden_size=nn_structure[1], output_size=nn_structure[2])
     net.set_from_genome(genome)
 
     game = Game(render=True, fps=20, seed=42)
+    step = 0
     while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit(0)
 
-        input_vec = game.get_input_vector()
+        input_vec = game.get_input_vector(input_size=nn_structure[0])
         output = net.forward(input_vec)
         action = output.argmax()
         reward, done = game.step(action)
+        step+=1
+        print(step)
         if done:
             pygame.time.wait(1000)
             game.reset()
+            step = 0
 
 if __name__ == '__main__':
-    run_save("v6/best_gen_20000.npy")
-    # run_ga(from_saved="v5/best_gen_2000.npy", to_save="v6/best_gen_{}.npy", max_generations=20000, step_limit=1000)
+    # run_interactive(fps=10)
+    run_save("v10/best_gen_10000.npy")
+    # run_ga(from_saved="v9/best_gen_4950.npy", to_save="v10/best_gen_{}.npy", max_generations=10000, step_limit=3000, incentivize_exploration=False)
