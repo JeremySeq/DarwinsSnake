@@ -432,7 +432,7 @@ def run_save(saved_genome: str, nn_structure = (10, 16, 3)):
     net = nn.NeuralNetworkFixed(input_size=nn_structure[0], hidden_size=nn_structure[1], output_size=nn_structure[2])
     net.set_from_genome(genome)
 
-    game = Game(render=True, fps=20, seed=42)
+    game = Game(render=True, fps=20, seed=random.randint(0, 100))
     step = 0
     while True:
         for event in pygame.event.get():
